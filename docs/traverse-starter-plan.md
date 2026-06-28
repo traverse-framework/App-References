@@ -1,8 +1,17 @@
-# traverse-starter Plan
+# App-References Plan
 
 ## Purpose
 
-`traverse-starter` is a reference UI application that demonstrates integrating a React frontend with the Traverse runtime. It is the canonical example of what an app built on Traverse looks like from the outside: a thin UI layer that starts workflows, receives events, and renders runtime-provided structured output — without owning any business logic.
+This repo holds reference UI applications that demonstrate integrating a React frontend with the Traverse runtime. Each app is a thin UI layer — it starts workflows, receives events, and renders runtime-provided structured output without owning any business logic.
+
+## Apps In This Repo
+
+| App | Path | Status |
+|---|---|---|
+| `traverse-starter` | `apps/traverse-starter/web-react` | Phase 1 in progress |
+| `youaskm3` | `apps/youaskm3/web-react` | Planned |
+
+---
 
 ## Architecture Boundary
 
@@ -10,194 +19,226 @@
 
 | Concern | Lives in |
 |---|---|
-| React UI shell | This repo (`apps/traverse-starter/web-react`) |
-| Runtime event client | This repo (thin boundary layer only) |
-| Business logic (tags, note type, next action, status) | Traverse runtime (external) |
-| App/workflow manifests | This repo (`manifests/`) |
-| Traverse CLI/runtime binary | External — pinned release or `TRAVERSE_REPO` override |
+| React UI shells | This repo |
+| Runtime event client (thin boundary only) | This repo |
+| App manifests and WASM component manifests | This repo (`manifests/<app>/`) |
+| Business capabilities and workflow execution | Traverse runtime (external) |
+| Business output fields (tags, title, note type, etc.) | Traverse runtime (external) |
+| Traverse CLI/runtime binary | External — pinned to `v0.3.0` |
 
 The React UI must not compute business fields. It renders, sorts, filters, and displays data provided by the runtime.
 
 ## Accepted Decisions
 
-- Phase 1 does not require live AI/model access. Traversal determinism is guaranteed by the runtime.
-- No private Traverse internals are imported into this repo.
-- No HTTP app registration endpoint in Phase 1.
-- No service registry in Phase 1.
-- No fake business logic or fake registration in the UI.
-- The canonical consumer path uses a pinned released Traverse runtime/CLI.
-- A `TRAVERSE_REPO=/path/to/Traverse` env override is supported for active framework development only.
+- Phase 1 does not require live AI/model access — runtime determinism is guaranteed
+- No private Traverse internals are imported into this repo
+- No HTTP app registration endpoint — setup uses `traverse-cli app validate` + `traverse-cli app register`
+- No service registry — discovery via `.traverse/server.json`
+- No fake business logic or fake registration in the UI
+- Canonical consumer path pins `v0.3.0` of the Traverse source build
+- `TRAVERSE_REPO=/path/to/Traverse` env override is supported for active framework development only
+
+## Traverse Runtime API (Resolved)
+
+The public integration surface is governed by spec `033-http-json-api` (approved, v1.1.0).
+
+| Detail | Value |
+|---|---|
+| Start runtime | `cargo run -p traverse-cli -- serve` |
+| Default address | `127.0.0.1:8787` |
+| Discovery file | `.traverse/server.json` |
+| Default workspace | `local-default` |
+| Health check | `GET /healthz` |
+| Execute capability | `POST /v1/workspaces/{workspace_id}/execute` |
+| Poll execution | `GET /v1/workspaces/{workspace_id}/executions/{execution_id}` |
+| Fetch trace | `GET /v1/workspaces/{workspace_id}/traces/{execution_id}` |
+| Error format | RFC 9457 Problem Details |
+| App validate | `traverse-cli app validate --manifest <path> --json` |
+| App register | `traverse-cli app register --manifest <path> --workspace <id> --json` |
+
+Discovery sequence:
+```bash
+BASE_URL="$(jq -r '.base_url' .traverse/server.json)"
+WORKSPACE_ID="$(jq -r '.workspace_default' .traverse/server.json)"
+```
+
+## Governing Specs (in Traverse repo)
+
+| Spec | Status | Governs |
+|---|---|---|
+| `033-http-json-api` | ✅ Approved v1.1.0 | HTTP+JSON runtime API, execute, trace, discovery |
+| `044-application-bundle-manifest` | ✅ Approved | App manifest, WASM component manifests, validation |
+| `046-public-cli-app-registration` | ✅ Approved | `traverse-cli app validate` + `app register` |
+| `013-browser-runtime-subscription` | ⚠️ Draft | Browser event subscription contract |
+| `019-local-browser-adapter-transport` | ⚠️ Draft | Local browser adapter transport |
+
+Phase 1 is governed by spec `033`. Phase 2 is governed by specs `044` and `046` — both are approved.
+
+---
+
+## traverse-starter
+
+### Purpose
+
+The simplest possible Traverse reference app. User enters a short note → Traverse processes it → UI renders runtime-provided structured output.
+
+### Phase 1 — HTTP Integration
+
+**Governing spec**: `033-http-json-api`
+
+**Deliverables:**
+
+1. **UI shell** — `apps/traverse-starter/web-react`
+   - React 18 + TypeScript + Vite + Vitest + ESLint
+   - Node version pinned in `.nvmrc`
+   - Configured for local Traverse runtime discovery via `.traverse/server.json`
+
+2. **Runtime HTTP client**
+   - Reads `.traverse/server.json` for `base_url` and `workspace_default`
+   - `POST /v1/workspaces/{workspace_id}/execute` to start capability
+   - `GET /v1/workspaces/{workspace_id}/executions/{execution_id}` to poll
+   - UI state: loading → polling → complete / error
+   - No private Traverse internals imported
+
+3. **Deterministic UI flow**
+   - User enters a short note input
+   - UI sends to Traverse runtime via HTTP execute
+   - UI renders runtime-provided: `title`, `tags`, `noteType`, `suggestedNextAction`, `status`
+   - UI computes none of these fields
+
+4. **Phase 1 smoke test**
+   - Connects to local Traverse runtime at `127.0.0.1:8787`
+   - POSTs execute request with fixture input
+   - Polls for completion
+   - Asserts required output fields present and non-empty
+
+### Phase 2 — App Registration
+
+**Governing specs**: `044-application-bundle-manifest`, `046-public-cli-app-registration`
+
+**Deliverables:**
+
+1. App manifest at `manifests/traverse-starter/app.manifest.json`
+2. WASM component manifest(s) in `manifests/traverse-starter/components/`
+3. CLI validation + registration in setup script
+4. Runtime loads registered workspace state
+5. Phase 2 smoke test proves end-to-end path
+
+---
+
+## youaskm3
+
+### Purpose
+
+The primary downstream reference app. A browser-hosted knowledge workflow app that uses Traverse for runtime execution, workflow state progression, trace generation, and MCP-facing behavior. Demonstrates the full app-consumable path including app bundle registration.
+
+### Phase 1 — HTTP Integration
+
+**Governing spec**: `033-http-json-api`
+
+Same HTTP integration pattern as traverse-starter, applied to a knowledge Q&A workflow.
+
+**Deliverables:**
+
+1. **UI shell** — `apps/youaskm3/web-react`
+2. **Runtime HTTP client** — same boundary as traverse-starter
+3. **Knowledge workflow UI**
+   - User submits a question or knowledge item
+   - UI sends to Traverse via HTTP execute
+   - UI renders runtime-provided output: answer, sources, reasoning trace, status
+4. **Phase 1 smoke test**
+
+### Phase 2 — App Registration
+
+**Governing specs**: `044-application-bundle-manifest`, `046-public-cli-app-registration`
+
+**Deliverables:**
+
+1. App manifest at `manifests/youaskm3/app.manifest.json`
+2. WASM component manifests in `manifests/youaskm3/components/`
+3. `traverse-cli app validate --manifest manifests/youaskm3/app.manifest.json --json`
+4. `traverse-cli app register --manifest manifests/youaskm3/app.manifest.json --workspace local-default --json`
+5. Runtime loads registered app → UI invokes registered workflow
+6. Phase 2 smoke test proves end-to-end path
+
+---
 
 ## Traverse Dependency Model
 
 ```bash
-# Default: pinned released Traverse CLI/runtime (version pinned in package.json or lockfile)
-npx traverse-cli ...
+# Default: Traverse v0.3.0 source build
+git clone https://github.com/traverse-framework/Traverse.git
+cd Traverse && git checkout v0.3.0
+cargo run -p traverse-cli -- serve
 
-# Override for framework development only
-TRAVERSE_REPO=/path/to/Traverse npx traverse-cli ...
+# Override for active framework development
+TRAVERSE_REPO=/path/to/Traverse
 ```
 
-Do not assume the Traverse repo is present unless the user or repo docs confirm it.
+Requirements: Rust 1.94+, local source checkout of Traverse `v0.3.0`.
 
-## Phase 1 Scope
-
-Goal: prove the UI-to-runtime integration path end-to-end with no live AI dependency.
-
-### Deliverables
-
-1. **UI shell** — `apps/traverse-starter/web-react`
-   - Starts locally
-   - Contains no Traverse business logic
-   - Configured with local Traverse runtime URL/discovery
-   - Documents pinned Traverse release and `TRAVERSE_REPO` override behavior
-
-2. **Runtime event client boundary**
-   - React starts a workflow through a public Traverse runtime/client interface
-   - React subscribes to correlated runtime events
-   - UI state is driven by events (loading, progress, failure, final)
-   - No private Traverse internals imported
-
-3. **Deterministic UI flow**
-   - User enters a short note/starter input
-   - UI sends input to Traverse runtime
-   - UI renders runtime-provided fields: title, tags, note type, suggested next action, workflow/event status
-   - UI does not compute these fields locally
-
-4. **Phase 1 smoke test**
-   - Starts or connects to local Traverse runtime
-   - Starts the React app or tests the app boundary
-   - Verifies: workflow start → event receipt → final rendered output
-   - Output is concise and CI-friendly
-
-### Business Fields (runtime-owned, UI renders only)
-
-- Title
-- Deterministic tags
-- Note type
-- Suggested next action
-- Workflow/event status
-
-## Phase 2 Scope
-
-Goal: prove that app validation and registration via the Traverse public CLI surface work end-to-end.
-
-### Target Commands
-
-```bash
-traverse-cli app validate --manifest <path> --json
-traverse-cli app register --manifest <path> --workspace <workspace-id> --json
-```
-
-### Deliverables
-
-1. App can validate Traverse app manifest and component manifests.
-2. App can register into durable local Traverse workspace state.
-3. Local runtime can load the registered app/workflow state.
-4. UI can invoke the registered workflow.
-5. Deterministic smoke test proves the end-to-end path.
-
-**Phase 2 is blocked** until the Traverse release exposes the public app validation/registration CLI surface above. Do not fake registration in this repo.
+Do not assume the Traverse repo is present unless confirmed. The canonical path is a pinned v0.3.0 source build.
 
 ## Proposed Smoke Tests
 
-### Phase 1
+### Phase 1 (traverse-starter and youaskm3)
 
 ```
-smoke-test:phase1
-  1. Start local Traverse runtime (or stub)
-  2. Start React app (or invoke app boundary directly)
-  3. POST start-workflow with fixture input
-  4. Assert events received: [started, progress, completed]
-  5. Assert rendered output contains runtime-provided fields (non-empty, not UI-computed)
-  6. Exit 0 on pass, exit 1 with diff on fail
+1. cargo run -p traverse-cli -- serve (in Traverse v0.3.0)
+2. Confirm .traverse/server.json written
+3. POST /v1/workspaces/local-default/execute with fixture input
+4. Poll GET /v1/workspaces/local-default/executions/{id} until completed
+5. Assert output fields present and non-empty
+6. Assert no business field computed in UI
 ```
 
-### Phase 2
+### Phase 2 (youaskm3)
 
 ```
-smoke-test:phase2
-  1. Run: traverse-cli app validate --manifest manifests/app.json --json
-  2. Assert: exit 0, valid JSON response
-  3. Run: traverse-cli app register --manifest manifests/app.json --workspace <id> --json
-  4. Assert: registered state is durable (re-query confirms)
-  5. Start runtime with registered app
-  6. Run Phase 1 smoke test against registered workflow
-  7. Exit 0 on pass
+1. traverse-cli app validate --manifest manifests/youaskm3/app.manifest.json --json → exit 0
+2. traverse-cli app register --manifest manifests/youaskm3/app.manifest.json --workspace local-default --json → exit 0
+3. cargo run -p traverse-cli -- serve
+4. Confirm registered workflow is discoverable
+5. Execute workflow via HTTP API
+6. Assert output matches registered app behavior
 ```
 
-## Open Questions
+## Open Questions (updated)
 
-1. What is the current pinned Traverse CLI version? Where is the release artifact?
-2. What does the Traverse runtime event client public interface look like (HTTP SSE, WebSocket, SDK)?
-3. What is the local runtime discovery mechanism (env var, config file, fixed port)?
-4. What fields does the runtime guarantee in the final workflow output event?
-5. Is there an existing app manifest schema, or does it need to be defined?
-6. Does Phase 2 CLI registration exist in any released or pre-release Traverse build?
+| # | Question | Status |
+|---|---|---|
+| 1 | What is the pinned Traverse CLI version? | ✅ Resolved — `v0.3.0` source build |
+| 2 | What does the runtime event client interface look like? | ✅ Resolved — HTTP+JSON, spec `033` |
+| 3 | What is the local runtime discovery mechanism? | ✅ Resolved — `.traverse/server.json`, port `8787`, workspace `local-default` |
+| 4 | What fields does the runtime guarantee in final output? | ⚠️ Pending — depends on registered capability contract |
+| 5 | Is there an existing app manifest schema? | ✅ Resolved — spec `044` is approved |
+| 6 | Does Phase 2 CLI registration exist in any released build? | ✅ Resolved — spec `046` is approved; verify implementation in v0.3.0 |
 
-## Ticket Breakdown
+## Ticket Index
 
-### Ticket 1: Define `traverse-starter` UI-only reference app plan
-**Status: Done** — this document.
+### traverse-starter
 
-DoD:
-- [x] Planning doc exists
-- [x] App boundary is explicit: UI-only in this repo
-- [x] Traverse runtime/business assets identified as external dependencies
-- [x] Phase 1 and Phase 2 separated
-- [x] No implementation scaffolding required beyond planning
+| # | Title | Status |
+|---|---|---|
+| 1 | Define traverse-starter UI-only reference app plan | Done |
+| 7 | Enable branch protection on main | Ready |
+| 8 | Track project governance and CI setup | Done |
+| 9 | Pin Traverse runtime to v0.3.0 and document local discovery | Ready |
+| 2 | Scaffold web React UI shell for traverse-starter | Ready |
+| 3 | Add runtime event client boundary for web React | Ready |
+| 4 | Add deterministic traverse-starter UI flow | Ready |
+| 5 | Add Phase 1 smoke test | Ready |
+| 6 | Track Phase 2 app registration integration | Ready (unblocked — spec 046 approved) |
 
----
+### youaskm3
 
-### Ticket 2: Scaffold web React UI shell for `traverse-starter`
-
-DoD:
-- `apps/traverse-starter/web-react` exists
-- UI shell starts locally
-- Contains no Traverse business logic
-- Has configuration for local Traverse runtime URL/discovery
-- Documents pinned Traverse release and `TRAVERSE_REPO` override behavior
-
----
-
-### Ticket 3: Add runtime event client boundary for web React
-
-DoD:
-- React can start a workflow through a public Traverse runtime/client boundary
-- React subscribes to correlated runtime events
-- UI state is driven by events
-- Failure, loading, progress, and final states are visible
-- No private Traverse internals imported
-
----
-
-### Ticket 4: Add deterministic traverse-starter UI flow
-
-DoD:
-- User can enter a short note or starter input
-- UI sends input to Traverse runtime
-- UI renders runtime-provided structured result fields
-- UI does not compute title/tags/type/next-action locally
-- Feature is deterministic (no live AI/model access required)
-
----
-
-### Ticket 5: Add Phase 1 smoke test
-
-DoD:
-- Smoke test starts or connects to local Traverse runtime
-- Smoke test starts the React app or tests the app boundary
-- Verifies: workflow start → event receipt → final rendered output
-- Output is concise and CI-friendly
-
----
-
-### Ticket 6: Track Phase 2 app validation/registration integration
-
-**Status: Blocked** — waiting on Traverse public app validation/registration CLI surface.
-
-DoD:
-- Phase 2 dependency documented (this doc, Phase 2 section)
-- Target commands listed
-- Task remains blocked until required Traverse release exists
-- No fake registration path introduced
+| # | Title | Status |
+|---|---|---|
+| 10 | Define youaskm3 reference app plan and scope | Ready |
+| 11 | Scaffold youaskm3 web React UI shell | Ready |
+| 12 | Author youaskm3 app manifest and WASM component manifests | Ready |
+| 13 | Add youaskm3 runtime HTTP client | Ready |
+| 14 | Implement youaskm3 knowledge workflow UI | Ready |
+| 15 | Add youaskm3 Phase 1 smoke test | Ready |
+| 16 | Implement youaskm3 CLI app validation and registration (Phase 2) | Ready |
+| 17 | Add youaskm3 Phase 2 smoke test | Ready |

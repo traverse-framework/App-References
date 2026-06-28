@@ -1,129 +1,159 @@
 #!/usr/bin/env bash
 # Phase 1 end-to-end smoke test.
-# Proves: workflow start → runtime event receipt → final rendered output.
+# Proves: runtime reachable → execute capability → poll completion → output fields present.
 #
-# Requires a local Traverse runtime running (or TRAVERSE_RUNTIME_URL set).
-# Set TRAVERSE_REPO to use a local Traverse build instead of the pinned release.
+# Governed by spec 033-http-json-api (approved v1.1.0).
+# Runtime: traverse-cli serve at 127.0.0.1:8787, discovery via .traverse/server.json.
 #
-# Exit 0 on pass. Exit 1 on failure with diff output.
+# Set TRAVERSE_RUNTIME_URL to override default discovery.
+# Set TRAVERSE_CAPABILITY_ID to override the capability being tested.
+# Exit 0 on pass. Exit 1 on failure.
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
-RUNTIME_URL="${TRAVERSE_RUNTIME_URL:-http://localhost:3000}"
+SERVER_JSON="${TRAVERSE_SERVER_JSON:-.traverse/server.json}"
 TIMEOUT="${SMOKE_TIMEOUT:-30}"
+CAPABILITY_ID="${TRAVERSE_CAPABILITY_ID:-traverse-starter}"
 
 echo "=== Phase 1 smoke test ==="
-echo "Runtime URL: $RUNTIME_URL"
-echo ""
 
-# ── 1. Check runtime is reachable ──────────────────────────────────────────
+# ── 1. Discover runtime ────────────────────────────────────────────────────
 
-echo "Step 1: checking runtime availability..."
-if ! curl -sf --max-time 5 "$RUNTIME_URL/health" > /dev/null 2>&1; then
-  echo "FAIL: Traverse runtime not reachable at $RUNTIME_URL"
+if [ -n "${TRAVERSE_RUNTIME_URL:-}" ]; then
+  BASE_URL="$TRAVERSE_RUNTIME_URL"
+  WORKSPACE_ID="${TRAVERSE_WORKSPACE_ID:-local-default}"
+  echo "Runtime URL (override): $BASE_URL"
+  echo "Workspace: $WORKSPACE_ID"
+elif [ -f "$SERVER_JSON" ]; then
+  BASE_URL="$(jq -r '.base_url' "$SERVER_JSON")"
+  WORKSPACE_ID="$(jq -r '.workspace_default' "$SERVER_JSON")"
+  echo "Runtime URL (discovered): $BASE_URL"
+  echo "Workspace: $WORKSPACE_ID"
+else
+  echo "FAIL: .traverse/server.json not found and TRAVERSE_RUNTIME_URL not set."
   echo ""
-  echo "Start the local runtime before running this smoke test:"
+  echo "Start the Traverse runtime first:"
   if [ -n "${TRAVERSE_REPO:-}" ]; then
     echo "  cd \$TRAVERSE_REPO && cargo run -p traverse-cli -- serve"
   else
-    echo "  npx traverse-cli serve"
+    echo "  cd <Traverse v0.3.0 checkout> && cargo run -p traverse-cli -- serve"
   fi
   exit 1
 fi
-echo "OK: runtime reachable"
+
 echo ""
 
-# ── 2. Start workflow ───────────────────────────────────────────────────────
+# ── 2. Health check ────────────────────────────────────────────────────────
 
-echo "Step 2: starting workflow with fixture input..."
-FIXTURE_INPUT='{"note": "Meeting with design team about onboarding flow"}'
+echo "Step 1: health check..."
+HEALTH=$(curl -sf --max-time 5 "$BASE_URL/healthz" 2>&1) || {
+  echo "FAIL: runtime not reachable at $BASE_URL/healthz"
+  exit 1
+}
 
-WORKFLOW_RESPONSE=$(curl -sf --max-time 10 \
-  -X POST "$RUNTIME_URL/workflow/start" \
+STATUS=$(echo "$HEALTH" | jq -r '.status' 2>/dev/null || echo "unknown")
+API_VERSION=$(echo "$HEALTH" | jq -r '.api_version' 2>/dev/null || echo "unknown")
+
+if [ "$STATUS" != "ok" ]; then
+  echo "FAIL: health status is '$STATUS' (expected 'ok')"
+  echo "$HEALTH"
+  exit 1
+fi
+
+echo "OK: runtime healthy — api_version=$API_VERSION workspace=$WORKSPACE_ID"
+echo ""
+
+# ── 3. Execute capability ──────────────────────────────────────────────────
+
+echo "Step 2: executing capability '$CAPABILITY_ID'..."
+FIXTURE_INPUT='{"text": "Meeting with design team about onboarding flow improvements"}'
+
+EXEC_RESPONSE=$(curl -sf --max-time 15 \
+  -X POST "$BASE_URL/v1/workspaces/$WORKSPACE_ID/execute" \
   -H "Content-Type: application/json" \
-  -d "{\"workflowId\": \"traverse-starter\", \"input\": $FIXTURE_INPUT}" \
+  -d "{\"capability_id\": \"$CAPABILITY_ID\", \"input\": $FIXTURE_INPUT}" \
   2>&1) || {
-  echo "FAIL: workflow start request failed"
-  echo "$WORKFLOW_RESPONSE"
+  echo "FAIL: execute request failed at POST /v1/workspaces/$WORKSPACE_ID/execute"
+  echo "$EXEC_RESPONSE"
   exit 1
 }
 
-RUN_ID=$(echo "$WORKFLOW_RESPONSE" | node -e "
-  const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-  if (!d.runId) { console.error('No runId in response:', JSON.stringify(d)); process.exit(1); }
-  process.stdout.write(d.runId);
-" 2>&1) || {
-  echo "FAIL: could not extract runId from workflow start response"
-  echo "Response: $WORKFLOW_RESPONSE"
-  exit 1
-}
+EXEC_STATUS=$(echo "$EXEC_RESPONSE" | jq -r '.status' 2>/dev/null || echo "unknown")
+EXECUTION_ID=$(echo "$EXEC_RESPONSE" | jq -r '.execution_id // empty' 2>/dev/null || echo "")
 
-echo "OK: workflow started — runId: $RUN_ID"
+if [ -z "$EXECUTION_ID" ] && [ "$EXEC_STATUS" = "succeeded" ]; then
+  # Synchronous completion — output is inline
+  echo "OK: synchronous execution completed"
+  RESULT="$EXEC_RESPONSE"
+elif [ -n "$EXECUTION_ID" ]; then
+  echo "OK: execution accepted — execution_id=$EXECUTION_ID"
+  RESULT=""
+else
+  echo "FAIL: execute response missing execution_id and status is not succeeded"
+  echo "$EXEC_RESPONSE"
+  exit 1
+fi
+
 echo ""
 
-# ── 3. Poll for completion ──────────────────────────────────────────────────
+# ── 4. Poll for completion (if async) ─────────────────────────────────────
 
-echo "Step 3: polling for workflow completion (timeout: ${TIMEOUT}s)..."
-ELAPSED=0
-STATUS=""
-RESULT=""
+if [ -z "$RESULT" ]; then
+  echo "Step 3: polling for completion (timeout: ${TIMEOUT}s)..."
+  ELAPSED=0
 
-while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-  POLL_RESPONSE=$(curl -sf --max-time 5 "$RUNTIME_URL/workflow/$RUN_ID" 2>&1) || {
-    sleep 2
-    ELAPSED=$((ELAPSED + 2))
-    continue
-  }
+  while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
+    POLL=$(curl -sf --max-time 5 \
+      "$BASE_URL/v1/workspaces/$WORKSPACE_ID/executions/$EXECUTION_ID" \
+      2>&1) || { sleep 2; ELAPSED=$((ELAPSED + 2)); continue; }
 
-  STATUS=$(echo "$POLL_RESPONSE" | node -e "
-    const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-    process.stdout.write(d.status || 'unknown');
-  " 2>/dev/null || echo "unknown")
+    EXEC_STATUS=$(echo "$POLL" | jq -r '.status' 2>/dev/null || echo "unknown")
 
-  if [ "$STATUS" = "completed" ]; then
-    RESULT="$POLL_RESPONSE"
-    break
-  elif [ "$STATUS" = "failed" ]; then
-    echo "FAIL: workflow failed"
-    echo "$POLL_RESPONSE"
+    case "$EXEC_STATUS" in
+      succeeded)
+        RESULT="$POLL"
+        echo "OK: execution succeeded"
+        break
+        ;;
+      failed|error)
+        echo "FAIL: execution failed"
+        echo "$POLL"
+        exit 1
+        ;;
+      *)
+        echo "  status: $EXEC_STATUS (${ELAPSED}s elapsed)"
+        sleep 2
+        ELAPSED=$((ELAPSED + 2))
+        ;;
+    esac
+  done
+
+  if [ -z "$RESULT" ]; then
+    echo "FAIL: execution did not complete within ${TIMEOUT}s (last status: $EXEC_STATUS)"
     exit 1
   fi
 
-  echo "  status: $STATUS (${ELAPSED}s elapsed)"
-  sleep 2
-  ELAPSED=$((ELAPSED + 2))
-done
-
-if [ "$STATUS" != "completed" ]; then
-  echo "FAIL: workflow did not complete within ${TIMEOUT}s (last status: $STATUS)"
-  exit 1
+  echo ""
 fi
 
-echo "OK: workflow completed"
-echo ""
+# ── 5. Assert output fields ────────────────────────────────────────────────
 
-# ── 4. Assert required output fields ───────────────────────────────────────
-
-echo "Step 4: asserting required runtime-provided output fields..."
+echo "Step 4: asserting runtime-provided output fields..."
 ASSERT_FAIL=0
 
 assert_field() {
   local field="$1"
   local value
-  value=$(echo "$RESULT" | node -e "
-    const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-    const v = d.output && d.output['$field'];
-    process.stdout.write(v !== undefined && v !== null && v !== '' ? 'ok' : 'missing');
-  " 2>/dev/null || echo "missing")
-
-  if [ "$value" = "ok" ]; then
-    echo "OK:   output.$field present"
+  value=$(echo "$RESULT" | jq -r ".output.$field // empty" 2>/dev/null || echo "")
+  if [ -n "$value" ] && [ "$value" != "null" ]; then
+    echo "OK:   output.$field = $value"
   else
     echo "FAIL: output.$field missing or empty"
     ASSERT_FAIL=1
   fi
 }
 
+# Fields are runtime-owned — UI must not compute these
 assert_field "title"
 assert_field "tags"
 assert_field "noteType"
@@ -134,10 +164,23 @@ echo ""
 if [ "$ASSERT_FAIL" -eq 1 ]; then
   echo "FAIL: one or more required output fields missing."
   echo "Full result:"
-  echo "$RESULT" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); console.log(JSON.stringify(d,null,2));"
+  echo "$RESULT" | jq .
   exit 1
 fi
 
+# ── 6. Fetch trace ─────────────────────────────────────────────────────────
+
+if [ -n "$EXECUTION_ID" ]; then
+  echo "Step 5: fetching public trace..."
+  TRACE=$(curl -sf --max-time 5 \
+    "$BASE_URL/v1/workspaces/$WORKSPACE_ID/traces/$EXECUTION_ID" 2>&1) || {
+    echo "WARN: trace fetch failed (non-blocking)"
+  }
+  TRACE_STATUS=$(echo "$TRACE" | jq -r '.status // empty' 2>/dev/null || echo "")
+  [ -n "$TRACE_STATUS" ] && echo "OK:   trace status=$TRACE_STATUS" || echo "WARN: trace not available"
+  echo ""
+fi
+
 echo "PASS: Phase 1 smoke test complete."
-echo "  runId:  $RUN_ID"
-echo "  status: completed"
+[ -n "$EXECUTION_ID" ] && echo "  execution_id: $EXECUTION_ID"
+echo "  status: succeeded"
