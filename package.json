@@ -1,0 +1,15 @@
+{
+  "name": "app-references",
+  "private": true,
+  "workspaces": [
+    "apps/traverse-starter/web-react"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/traverse-starter/web-react",
+    "build": "npm run build -w apps/traverse-starter/web-react",
+    "typecheck": "npm run typecheck -w apps/traverse-starter/web-react",
+    "lint": "npm run lint -w apps/traverse-starter/web-react",
+    "test": "npm run test -w apps/traverse-starter/web-react",
+    "test:coverage": "npm run test:coverage -w apps/traverse-starter/web-react"
+  }
+}
