@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+dist/
+
+# Test coverage
+coverage/
+
+# IDE / System
+.DS_Store
+.vscode/
+.idea/
+
+# Local env files
+.env.local
+.env.*.local
