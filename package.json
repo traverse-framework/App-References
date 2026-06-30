@@ -2,7 +2,8 @@
   "name": "app-references",
   "private": true,
   "workspaces": [
-    "apps/traverse-starter/web-react"
+    "apps/traverse-starter/web-react",
+    "apps/youaskm3/web-react"
   ],
   "scripts": {
     "dev": "npm run dev -w apps/traverse-starter/web-react",
